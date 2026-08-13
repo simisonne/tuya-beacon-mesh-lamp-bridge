@@ -110,18 +110,18 @@ def btmgmt(*args):
 
 def prepare_radio():
     """BCM43455 wedge protection (found live 2026-08-13): after a few minutes the
-    controller can silently wedge - add-adv reports 'Instance added' but the radio
+    controller can silently wedge, add-adv reports 'Instance added' but the radio
     does NOT transmit (sniffer: 0 frames), while hci0 still shows UP/powered.
     hciconfig reset + up reliably restores transmission (~5s). Run before EVERY
-    command (once per command, not per frame)."""
-    if os.geteuid() == 0:
-        subprocess.run(["hciconfig", "hci0", "reset"], capture_output=True, timeout=15)
-        time.sleep(3)
-        subprocess.run(["hciconfig", "hci0", "up"], capture_output=True, timeout=15)
-    else:
-        subprocess.run(["sudo", "-n", "hciconfig", "hci0", "reset"], capture_output=True, timeout=15)
-        time.sleep(3)
-        subprocess.run(["sudo", "-n", "hciconfig", "hci0", "up"], capture_output=True, timeout=15)
+    command (once per command, not per frame).
+    ALWAYS via sudo, even as root (2026-08-13 ~18:55): the direct root path does
+    not really reset the controller (add-adv OK, 0 frames on air), while
+    sudo -n hciconfig makes it transmit again. Same quirk as btmgmt."""
+    subprocess.run(["sudo", "-n", "hciconfig", "hci0", "reset"], capture_output=True, timeout=15)
+    time.sleep(3)
+    r = subprocess.run(["sudo", "-n", "hciconfig", "hci0", "up"], capture_output=True, text=True, timeout=15)
+    if r.returncode != 0:
+        print(f"prepare_radio: hciconfig up error: {r.stderr.strip()[:80]}", flush=True)
     time.sleep(0.5)
 
 def send(adv_hex, counter):
@@ -142,14 +142,9 @@ def send(adv_hex, counter):
     if r.returncode != 0 or "removed" not in r.stdout.lower():
         # instance stuck (observed 2026-08-13: clr-adv 0x0d -> a stale frame kept
         # transmitting for minutes and flooded the mesh). Hard reset:
-        if os.geteuid() == 0:
-            subprocess.run(["hciconfig", "hci0", "reset"], capture_output=True, timeout=15)
-            time.sleep(3)
-            subprocess.run(["hciconfig", "hci0", "up"], capture_output=True, timeout=15)
-        else:
-            subprocess.run(["sudo", "-n", "hciconfig", "hci0", "reset"], capture_output=True, timeout=15)
-            time.sleep(3)
-            subprocess.run(["sudo", "-n", "hciconfig", "hci0", "up"], capture_output=True, timeout=15)
+        subprocess.run(["sudo", "-n", "hciconfig", "hci0", "reset"], capture_output=True, timeout=15)
+        time.sleep(3)
+        subprocess.run(["sudo", "-n", "hciconfig", "hci0", "up"], capture_output=True, timeout=15)
         print(f"  (clr-adv stuck: {r.stdout.strip()[:60]} -> hciconfig reset)", flush=True)
     time.sleep(0.3)
     return "OK (Z=0x%04x, ~2s sent)" % counter
