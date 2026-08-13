@@ -71,20 +71,15 @@ bl_state = {"state": "OFF", "brightness": 95, "rgb_color": (255, 255, 255)}
 def send_dp(name):
     kern, mic4 = tbc.DP[name]
     stream = "bl" if name.startswith("bl") or name.startswith("color") else None
-    out = ""
-    # Double send (2026-08-13 ~19:00): the BCM43455 intermittently transmits
-    # NOTHING on air although add-adv reports "Instance added" (sniffer: 0
-    # frames). A second attempt with a fresh counter and a fresh prepare_radio
-    # is a harmless reapply and doubles the chance that at least one frame goes
-    # on air.
-    for attempt in (1, 2):
-        if attempt > 1:
-            tbc.prepare_radio()
-        c = tbc.get_counter() + 1
-        adv = tbc.forge(c, kern, mic4, stream)
-        out = tbc.send(adv, c)
-        tbc.save_counter(c)
-        print(f"[bridge] -> {name} (Z=0x{c:04x}, attempt {attempt}): {out}", flush=True)
+    # Single send like the app (2026-08-13 ~20:15): the double send was reverted.
+    # The flood trigger was the stale tail (clr-adv lie, the instance kept
+    # transmitting for minutes), not too few frames; send() now does a
+    # guaranteed controller reset after EVERY command.
+    c = tbc.get_counter() + 1
+    adv = tbc.forge(c, kern, mic4, stream)
+    out = tbc.send(adv, c)
+    tbc.save_counter(c)
+    print(f"[bridge] -> {name} (Z=0x{c:04x}): {out}", flush=True)
     return out
 
 def nearest(v, table):

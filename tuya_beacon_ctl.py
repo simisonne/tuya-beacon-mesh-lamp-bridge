@@ -127,26 +127,49 @@ def prepare_radio():
 def send(adv_hex, counter):
     btmgmt("clr-adv")                  # clear ALL instances (rm-adv 1 was unreliable)
     time.sleep(0.4)
-    r = btmgmt("add-adv", "-c", "-d", adv_hex, "1")
-    if "Instance added" not in r.stdout and "added" not in r.stdout.lower():
-        # transient 0x0d right after the previous frame (observed 2026-08-13):
-        # retry once
+    # add-adv ASYNC via Popen (2026-08-13 ~20:40): on a loaded controller the
+    # MGMT response can take 4-5s, but the instance already advertises from the
+    # moment the command is accepted, so the effective window grew to 5-7s and
+    # the lamp latched the frame into its relay loop (freeze, 20:23/0x08e4,
+    # sniffer verified). The app sends 2-3 copies in 1-2s and never latches.
+    # So: let it advertise 1.6s, then clr-adv IMMEDIATELY. The window is then
+    # bounded at about 2s regardless of the response time.
+    p = subprocess.Popen(["sudo", "-n", "btmgmt", "-i", "hci0", "add-adv", "-c", "-d", adv_hex, "1"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         stdin=subprocess.PIPE)
+    time.sleep(1.6)
+    btmgmt("clr-adv")
+    try:
+        out, err = p.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, err = "", "TIMEOUT add-adv"
+    if "added" not in (out + err).lower():
+        # transient 0x0d (stale instance or similar) -> retry once
         time.sleep(0.6)
         btmgmt("clr-adv")
         time.sleep(0.4)
-        r = btmgmt("add-adv", "-c", "-d", adv_hex, "1")
-    if "Instance added" not in r.stdout and "added" not in r.stdout.lower():
-        return r.stdout.strip() or r.stderr.strip()
-    time.sleep(1.8)                    # 1-2 copies are enough (first frame goes out instantly)
-    r = btmgmt("clr-adv")              # then stop
-    if r.returncode != 0 or "removed" not in r.stdout.lower():
-        # instance stuck (observed 2026-08-13: clr-adv 0x0d -> a stale frame kept
-        # transmitting for minutes and flooded the mesh). Hard reset:
-        subprocess.run(["sudo", "-n", "hciconfig", "hci0", "reset"], capture_output=True, timeout=15)
-        time.sleep(3)
-        subprocess.run(["sudo", "-n", "hciconfig", "hci0", "up"], capture_output=True, timeout=15)
-        print(f"  (clr-adv stuck: {r.stdout.strip()[:60]} -> hciconfig reset)", flush=True)
-    time.sleep(0.3)
+        p = subprocess.Popen(["sudo", "-n", "btmgmt", "-i", "hci0", "add-adv", "-c", "-d", adv_hex, "1"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             stdin=subprocess.PIPE)
+        time.sleep(1.6)
+        btmgmt("clr-adv")
+        try:
+            out, err = p.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            out, err = "", "TIMEOUT add-adv retry"
+        if "added" not in (out + err).lower():
+            return (out or err).strip()
+    # GUARANTEED cleanup (2026-08-13 ~20:30): hciconfig reset alone is NOT
+    # enough (20:19: the 0x08e2 send left a stale instance despite reset+up
+    # which kept flooding for minutes). A systemctl restart bluetooth is the
+    # only 100% reliable kill (verified twice). The app never has this
+    # problem, its radio leaves no stale instance behind.
+    subprocess.run(["sudo", "-n", "systemctl", "restart", "bluetooth"], capture_output=True, timeout=30)
+    time.sleep(3)
+    subprocess.run(["sudo", "-n", "hciconfig", "hci0", "up"], capture_output=True, timeout=15)
+    time.sleep(0.5)
     return "OK (Z=0x%04x, ~2s sent)" % counter
 
 def main():
