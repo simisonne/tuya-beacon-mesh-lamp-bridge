@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Tuya Beacon-Mesh ceiling lamp - local control from a Raspberry Pi (no app/cloud/gateway).
+"""Tuya Beacon Mesh ceiling lamp, local control from a Raspberry Pi (no app/cloud/gateway).
 
 Protocol (cracked 2026-08-13, verified against 29/29 captured frames):
   AdvData = 020101 1b03 | 0b61bc000701 | cnt(2B LE) | kern(13B) | MIC4(4B) | t5(1B)
   t5 = CRC8(poly=0x07, init=0, no-refin) over [0b61bc000701 | cnt | kern | MIC4] XOR 0xB5
-  cnt must be greater than the last counter the lamp has seen (lamp-side dedup);
-  it is persisted in a state file next to this script (all callers share it).
+  cnt must be greater than the last counter the lamp has seen (lamp side dedup).
+  It is persisted in a state file next to this script (all callers share it).
 
 The kernel is the encrypted DP payload (Tuya beacon SDK frame_send with the
-per-device beacon key). Values are device-specific: if your lamp has different
+per device beacon key). Values are device specific: if your lamp has different
 brightness/color levels, capture your own frames (see tools/plaintext_capture.py
 and docs/PROTOCOL.md) and extend the DP dictionary below.
 
@@ -22,43 +22,43 @@ import sys
 import time
 
 # --- Constants -----------------------------------------------------------
-STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lampe_counter.json")
+STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lamp_counter.json")
 
-# DP dictionary: 22 commands extracted from a known-plaintext capture (2026-08-13)
-# IMPORTANT: kernels are 13B (26 hex); hell* kernels END on 'ec'. An intermediate
+# DP dictionary: 22 commands extracted from a known plaintext capture (2026-08-13)
+# IMPORTANT: kernels are 13B (26 hex). bri* kernels END on 'ec'. An intermediate
 # version with 12B kernels (4c09c4f84bb8693ddfaf6ae0) produced broken 30B frames -> kernel 0x0d!
 DP = {
-    "aus":      ("3a36cebe8edf95850ae6308b55", "883e6ed4"),   # relay off
-    "an":       ("dfcf36aa6b2c34ed15db67bd3d", "60d8d6fe"),   # relay on
-    "hell25":   ("be56d4cfffdfb0cf314e65b036", "4ccfa9a3"),   # brightness 25%
-    "hell52":   ("5c41d16eaabc41c23e6cba39c6", "ecb5ec3f"),   # brightness 52%
-    "hell79":   ("4c09c4f84bb8693ddfaf6ae0ec", "44a50cc9"),   # brightness 79%
+    "on":       ("dfcf36aa6b2c34ed15db67bd3d", "60d8d6fe"),   # relay on
+    "off":      ("3a36cebe8edf95850ae6308b55", "883e6ed4"),   # relay off
+    "bri25":    ("be56d4cfffdfb0cf314e65b036", "4ccfa9a3"),   # brightness 25%
+    "bri52":    ("5c41d16eaabc41c23e6cba39c6", "ecb5ec3f"),   # brightness 52%
+    "bri79":    ("4c09c4f84bb8693ddfaf6ae0ec", "44a50cc9"),   # brightness 79%
     "temp0":    ("109ee02e7dbad12c34f43b2a01", "960c8317"),   # color_temp 0% (warm)
     "temp42":   ("8037842f227b37f792f187846a", "83b10565"),   # color_temp 42%
     "temp99":   ("66e175b3b76ec42eef842daf88", "5a36660b"),   # color_temp 99% (cold)
-    # Backlight (freshly captured 2026-08-13, order app-verified):
-    # bl_anders = ON, bl_an = OFF (the old labels were inverted!)
-    "bl_anders":("e9447e2fc85af4287c3b9a550b", "2ce9e348"),   # backlight ON
-    "bl_an":    ("0c6322e99fc4517f9a2360263d", "8e678e23"),   # backlight OFF
+    # Backlight (freshly captured 2026-08-13, order app verified):
+    # bl_on = ON, bl_off = OFF (the old labels were inverted!)
+    "bl_on":    ("e9447e2fc85af4287c3b9a550b", "2ce9e348"),   # backlight ON
+    "bl_off":   ("0c6322e99fc4517f9a2360263d", "8e678e23"),   # backlight OFF
     "bl5":      ("55bb35e8f823f11193525d107d", "a6fff9fb"),   # brightness 5%
     "bl28":     ("03b0758709ac62a6eee4d5c1ac", "9d406905"),   # brightness 28%
     "bl52":     ("3efa92fa33ad32c5943ab27288", "9c0da56c"),   # brightness 52%
     "bl80":     ("9a4ca07eaec900f8b9dc8815eb", "420596d2"),   # brightness 80%
     "bl95":     ("3a9aead6506397aadafca74298", "20f3313c"),   # brightness 95%
-    "farbe_rot":     ("7526a354938ae0c6a949a1f7ab", "4ce1ea73"),
-    "farbe_gelb":    ("1616b127aecd0ba3f47a803976", "1199b355"),
-    "farbe_gruen":   ("b3c485f9f2b7065f4cab3d33cd", "568a072f"),
-    "farbe_hellblau":("5b77017b898c8c275b9a04511a", "3aaa4e6b"),
-    "farbe_blau":    ("fe2cdc8c63b7cc39a9a772991d", "9720117b"),
-    "farbe_pink":    ("8c71de5029a3e7129bf93dd9ad", "9040012e"),
-    "farbe_weiss":   ("fb7dd77a687da3ce3f2322fd66", "7ceb5fed"),
+    "color_red":     ("7526a354938ae0c6a949a1f7ab", "4ce1ea73"),
+    "color_yellow":  ("1616b127aecd0ba3f47a803976", "1199b355"),
+    "color_green":   ("b3c485f9f2b7065f4cab3d33cd", "568a072f"),
+    "color_cyan":    ("5b77017b898c8c275b9a04511a", "3aaa4e6b"),
+    "color_blue":    ("fe2cdc8c63b7cc39a9a772991d", "9720117b"),
+    "color_pink":    ("8c71de5029a3e7129bf93dd9ad", "9040012e"),
+    "color_white":   ("fb7dd77a687da3ce3f2322fd66", "7ceb5fed"),
 }
 
 # --- Protocol ------------------------------------------------------------
-MESH = "0b61bc000701"    # Stream 01 = main light DPs (an/aus/hell/temp)
-MESH_BL = "0b61bc000702" # Stream 02 = backlight DPs (bl_*/farbe_*)!
-# 2026-08-13 capture-verified: the app's backlight frames use the header
-# 0b61bc000702; with the stream-01 header the lamp silently ignored them.
+MESH = "0b61bc000701"    # Stream 01 = main light DPs (on/off/bri/temp)
+MESH_BL = "0b61bc000702" # Stream 02 = backlight DPs (bl_*/color_*)!
+# 2026-08-13 capture verified: the app's backlight frames use the header
+# 0b61bc000702. With the stream-01 header the lamp silently ignored them.
 
 def crc8_poly07(data):
     crc = 0
@@ -93,7 +93,7 @@ def btmgmt(*args):
     # 2026-08-13 live proof: the direct root path (no sudo) reported add-adv
     # "Instance added" but the controller did NOT transmit (sniffer: 0 frames),
     # while the sudo path went on air immediately.
-    # stdin=PIPE is the anti-hang fix (no use_pty needed; a char-device stdin
+    # stdin=PIPE is the anti hang fix (no use_pty needed, a char device stdin
     # makes btmgmt/ell block forever in epoll_wait).
     cmd = ["sudo", "-n", "btmgmt", "-i", "hci0", *args]
     try:
@@ -106,7 +106,7 @@ def btmgmt(*args):
                        capture_output=True, timeout=25)
         time.sleep(3)
         subprocess.run(["sudo", "-n", "hciconfig", "hci0", "up"], capture_output=True)
-        return subprocess.CompletedProcess([], 1, stdout="", stderr="TIMEOUT+BT-Reset: btmgmt hang")
+        return subprocess.CompletedProcess([], 1, stdout="", stderr="TIMEOUT+BT Reset: btmgmt hang")
 
 def prepare_radio():
     """BCM43455 wedge protection (found live 2026-08-13): after a few minutes the
@@ -152,7 +152,7 @@ def send(adv_hex, counter):
             subprocess.run(["sudo", "-n", "hciconfig", "hci0", "up"], capture_output=True, timeout=15)
         print(f"  (clr-adv stuck: {r.stdout.strip()[:60]} -> hciconfig reset)", flush=True)
     time.sleep(0.3)
-    return "OK (Z=0x%04x, ~2s gesendet)" % counter
+    return "OK (Z=0x%04x, ~2s sent)" % counter
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in DP:
@@ -160,7 +160,7 @@ def main():
         sys.exit(1)
     name = sys.argv[1]
     kern, mic4 = DP[name]
-    stream = "bl" if name.startswith("bl") or name.startswith("farbe") else None
+    stream = "bl" if name.startswith("bl") or name.startswith("color") else None
     c = get_counter() + 1
     prepare_radio()                    # BCM43455 wedge protection (once per command)
     adv = forge(c, kern, mic4, stream)

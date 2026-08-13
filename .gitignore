@@ -2,7 +2,7 @@
 config.env
 
 # Lamp counter state (device-specific)
-lampe_counter.json
+lamp_counter.json
 
 __pycache__/
 *.pyc

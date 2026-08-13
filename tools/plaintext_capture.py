@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Known-plaintext capture for Tuya BLE-mesh lamps (Telink TLSR8266, fe65 gen).
+"""Known plaintext capture for Tuya BLE mesh lamps (Telink TLSR8266, fe65 gen).
 
 VERIFIED 2026-08-13 on a QC0033 ceiling lamp: the Tuya Smart Life app controls
 the lamp via BLE ADVERTISING packets (no GATT connection). Each app action
-produces 2 ADV frames = (temp-value, brightness-value). DP values are
-DETERMINISTIC: same value => same 14-byte kernel, independent of the frame
+produces 2 ADV frames = (temp value, brightness value). DP values are
+DETERMINISTIC: same value => same 14 byte kernel, independent of the frame
 counter. This tool records the frames so you can build/extend the DP dictionary
 for YOUR lamp.
 
@@ -12,7 +12,7 @@ Payload layout (Nordic SnifferAPI payload bytes):
   AdvA(6) + 020101 (Limited Discoverable) + 1b03 + 0b61bc + 000701
   + <2B counter LE> + <14B kernel starting 0x05> + <8B MIC tail>
 
-CRITICAL: the payload STARTS with the 6-byte AdvA, so the flags sit at hex
+CRITICAL: the payload STARTS with the 6 byte AdvA, so the flags sit at hex
 offset 12, NOT 0. A naive startswith('020101') filter silently captures
 NOTHING (bug hit 2026-08-13).
 
@@ -68,7 +68,7 @@ try:
                 seen[key] += 1
                 continue
             seen[key] = 1
-            # flags at hex offset 12-18 (payload begins with 6-byte AdvA!)
+            # flags at hex offset 12-18 (payload begins with 6 byte AdvA!)
             flags_pos = ph[12:18]
             is_limdisc = flags_pos == '020101'
             is_lamp = is_limdisc and any(mk in ph for mk in MARKER_OK)

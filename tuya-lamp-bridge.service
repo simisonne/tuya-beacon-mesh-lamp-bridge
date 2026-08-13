@@ -9,7 +9,7 @@ Type=simple
 # Alternative: a non-root user with NOPASSWD sudoers for btmgmt/hciconfig.
 User=root
 WorkingDirectory=/opt/tuya-lamp-bridge
-ExecStart=/usr/bin/python3 /opt/tuya-lamp-bridge/tuya_lampe_mqtt_bridge.py
+ExecStart=/usr/bin/python3 /opt/tuya-lamp-bridge/tuya_lamp_mqtt_bridge.py
 Restart=on-failure
 RestartSec=5
 
