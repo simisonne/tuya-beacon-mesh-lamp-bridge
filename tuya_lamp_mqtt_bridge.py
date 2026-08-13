@@ -73,7 +73,7 @@ def send_dp(name):
     stream = "bl" if name.startswith("bl") or name.startswith("color") else None
     # Single send like the app (2026-08-13 ~20:15): the double send was reverted.
     # The flood trigger was the stale tail (clr-adv lie, the instance kept
-    # transmitting for minutes), not too few frames; send() now does a
+    # transmitting for minutes), not too few frames. send() now does a
     # guaranteed controller reset after EVERY command.
     c = tbc.get_counter() + 1
     adv = tbc.forge(c, kern, mic4, stream)
