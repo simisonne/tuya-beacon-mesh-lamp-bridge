@@ -23,6 +23,10 @@ import time
 
 # --- Constants -----------------------------------------------------------
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lamp_counter.json")
+# Timestamp of the last guaranteed cleanup (send() sets it after the bluetooth
+# restart). The bridge uses it to skip the 5s radio reset before a command
+# when the radio is already fresh (latency optimization, 2026-08-13 ~21:30).
+LAST_CLEANUP = 0.0
 
 # DP dictionary: 22 commands extracted from a known plaintext capture (2026-08-13)
 # IMPORTANT: kernels are 13B (26 hex). bri* kernels END on 'ec'. An intermediate
@@ -125,6 +129,7 @@ def prepare_radio():
     time.sleep(0.5)
 
 def send(adv_hex, counter):
+    global LAST_CLEANUP
     btmgmt("clr-adv")                  # clear ALL instances (rm-adv 1 was unreliable)
     time.sleep(0.4)
     # add-adv ASYNC via Popen (2026-08-13 ~20:40): on a loaded controller the
@@ -170,6 +175,7 @@ def send(adv_hex, counter):
     time.sleep(3)
     subprocess.run(["sudo", "-n", "hciconfig", "hci0", "up"], capture_output=True, timeout=15)
     time.sleep(0.5)
+    LAST_CLEANUP = time.time()
     return "OK (Z=0x%04x, ~2s sent)" % counter
 
 def main():

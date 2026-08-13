@@ -176,8 +176,12 @@ def _apply_main(client, cmd):
     global state
     try:
         changed = False
-        # BCM43455 wedge protection: fresh radio once per command
-        tbc.prepare_radio()
+        # BCM43455 wedge protection: freshen the radio only when the last
+        # cleanup is older than 60s. The send() cleanup (bluetooth restart)
+        # just restarted the radio, so this saves 5s of latency per command
+        # (2026-08-13 ~21:30, HA reaction ~10s -> ~4s).
+        if time.time() - tbc.LAST_CLEANUP > 60:
+            tbc.prepare_radio()
         # ALWAYS send (fresh counter = harmless reapply, lamp dedup only blocks
         # same counter repeats). Reason: external changes (CLI, app, power cycle)
         # desync the internal state, so state guards would wrongly skip commands.
@@ -214,7 +218,10 @@ def _apply_bl(client, cmd):
     global bl_state
     try:
         changed = False
-        tbc.prepare_radio()            # BCM43455 wedge protection
+        # BCM43455 wedge protection, only when the last cleanup is older than
+        # 60s (latency optimization, 2026-08-13 ~21:30).
+        if time.time() - tbc.LAST_CLEANUP > 60:
+            tbc.prepare_radio()
         if "state" in cmd:
             if cmd["state"] in ("ON", "on", "true", True):
                 send_dp("bl_on")
