@@ -1,0 +1,8 @@
+# Local configuration with credentials - never commit!
+config.env
+
+# Lamp counter state (device-specific)
+lampe_counter.json
+
+__pycache__/
+*.pyc
