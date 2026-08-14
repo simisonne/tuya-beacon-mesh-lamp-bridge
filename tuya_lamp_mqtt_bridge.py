@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""Tuya Beacon Mesh ceiling lamp, MQTT bridge to Home Assistant (local control).
+"""Tuya Beacon Mesh ceiling lamp - MQTT bridge to Home Assistant (local control).
 
 Reads config.env (MQTT access + topics) from the same directory.
-Forge logic is imported from tuya_beacon_ctl.py (same directory).
+Sends commands over USB serial to the ESP32-S3 (tuya_beacon_tx.ino), which
+forges the frames and broadcasts them as BLE advertising (counter lives in the
+ESP32 NVS).
 
-Flow: HA (JSON light) -> MQTT <prefix>/set -> forge -> btmgmt -> lamp
+Flow: HA (JSON light) -> MQTT <prefix>/set -> serial -> ESP32 -> BLE -> lamp
       Status -> MQTT <prefix>/state -> HA
 
-Brightness/ColorTemp: the app sends 2 frames per action (temp value + brightness
-value), the unchanged value first, then the changed one (capture verified
-2026-08-13). ON/OFF is a single frame.
-
-Depends on: python3 + paho-mqtt (pip install paho-mqtt), bluez btmgmt/hciconfig.
-The bridge must run as root (systemd unit provided) OR the service user needs
-NOPASSWD sudoers for btmgmt/hciconfig/pkill/systemctl bluetooth (see README).
+No btmgmt/BCM43455 anymore: forge, counter and transmit all run on the ESP32.
+The bridge keeps only the MQTT part with debounce merge and nearest mapping
+onto the 23 dictionary commands (an/aus/hell*/temp*/bl_*/farbe_*).
 """
-import os, sys, json, time, signal, threading, subprocess, importlib.util
+import os, sys, json, time, signal, threading
+import serial
 import paho.mqtt.client as mqtt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,10 +35,12 @@ MQTT_HOST = ENV.get("MQTT_HOST", "192.168.1.173")
 MQTT_PORT = int(ENV.get("MQTT_PORT", "1883"))
 MQTT_USER = ENV.get("MQTT_USER", "homeassistant")
 MQTT_PASS = ENV.get("MQTT_PASS", "")
-PREFIX = ENV.get("MQTT_TOPIC_PREFIX", "tuya/lamp")
+PREFIX = ENV.get("MQTT_TOPIC_PREFIX", "tuya/lampe")
 DISC_PREFIX = ENV.get("HA_DISCOVERY_PREFIX", "homeassistant")
-NAME = ENV.get("DEVICE_NAME", "Tuya Ceiling Lamp")
-UNIQ = ENV.get("DEVICE_IDENTIFIER", "tuya_beacon_lamp")
+NAME = ENV.get("DEVICE_NAME", "Deckenlampe")
+UNIQ = ENV.get("DEVICE_IDENTIFIER", "tuya_lampe_deckenlampe")
+SERIAL_PORT = ENV.get("SERIAL_PORT", "/dev/ttyACM0")
+SERIAL_BAUD = int(ENV.get("SERIAL_BAUD", "115200"))
 
 CMD_TOPIC = f"{PREFIX}/set"
 STATE_TOPIC = f"{PREFIX}/state"
@@ -48,39 +49,57 @@ BL_CMD_TOPIC = f"{PREFIX}/backlight/set"
 BL_STATE_TOPIC = f"{PREFIX}/backlight/state"
 BL_DISC_TOPIC = f"{DISC_PREFIX}/light/{UNIQ}_backlight/config"
 
-# Forge logic imported from tuya_beacon_ctl.py (same directory)
-spec = importlib.util.spec_from_file_location("tbc", os.path.join(HERE, "tuya_beacon_ctl.py"))
-tbc = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(tbc)
-
-BRIGHTNESS = {"bri25": 25, "bri52": 52, "bri79": 79}
+BRIGHTNESS = {"hell25": 25, "hell52": 52, "hell79": 79}
 COLORTEMP = {"temp0": 0, "temp42": 42, "temp99": 99}
 # Mireds range per HA target: 154 (cold/6500K) .. 500 (warm/2000K) <-> temp_value 1000..0
 MIREDS_COLD, MIREDS_WARM = 154, 500
 
-# Backlight (2026-08-13 capture verified, stream 02!):
+# Backlight (capture verified 2026-08-13, stream 02):
 BL_BRIGHTNESS = {"bl5": 5, "bl28": 28, "bl52": 52, "bl80": 80, "bl95": 95}
-BL_COLORS = {"color_red": (255, 0, 0), "color_yellow": (255, 255, 0),
-             "color_green": (0, 255, 0), "color_cyan": (0, 255, 255),
-             "color_blue": (0, 0, 255), "color_pink": (255, 0, 255),
-             "color_white": (255, 255, 255)}
+BL_COLORS = {"farbe_rot": (255, 0, 0), "farbe_gelb": (255, 255, 0),
+             "farbe_gruen": (0, 255, 0), "farbe_hellblau": (0, 255, 255),
+             "farbe_blau": (0, 0, 255), "farbe_pink": (255, 0, 255),
+             "farbe_weiss": (255, 255, 255)}
 
 state = {"state": "OFF", "brightness": 52, "color_temp": 42}
 bl_state = {"state": "OFF", "brightness": 95, "rgb_color": (255, 255, 255)}
 
+# --- Serial layer to the ESP32 -------------------------------------------------
+_ser = None
+_ser_lock = threading.Lock()
+
+def serial_send(name):
+    """Send one command name to the ESP32 and return the response line."""
+    global _ser
+    with _ser_lock:
+        try:
+            if _ser is None:
+                _ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=3)
+                time.sleep(0.3)          # let the port settle after (re)connect
+                _ser.reset_input_buffer()
+            _ser.reset_input_buffer()
+            _ser.write((name + "\n").encode())
+            out = ""
+            line = _ser.readline().decode("utf-8", errors="replace").strip()
+            if line:
+                out = line
+            print(f"[bridge] -> {name}: {out or '(no reply)'}", flush=True)
+            return out
+        except serial.SerialException as e:
+            print(f"[bridge] serial error ({e}), port reopens on next command",
+                  flush=True)
+            try:
+                if _ser is not None:
+                    _ser.close()
+            except Exception:
+                pass
+            _ser = None
+            return None
+
 def send_dp(name):
-    kern, mic4 = tbc.DP[name]
-    stream = "bl" if name.startswith("bl") or name.startswith("color") else None
-    # Single send like the app (2026-08-13 ~20:15): the double send was reverted.
-    # The flood trigger was the stale tail (clr-adv lie, the instance kept
-    # transmitting for minutes), not too few frames. send() now does a
-    # guaranteed controller reset after EVERY command.
-    c = tbc.get_counter() + 1
-    adv = tbc.forge(c, kern, mic4, stream)
-    out = tbc.send(adv, c)
-    tbc.save_counter(c)
-    print(f"[bridge] -> {name} (Z=0x{c:04x}): {out}", flush=True)
-    return out
+    """Always send (fresh counter on the ESP32 is harmless, the lamp applies it again).
+    No state guards (2026-08-13)."""
+    return serial_send(name)
 
 def nearest(v, table):
     return min(table, key=lambda x: abs(x - v))
@@ -106,11 +125,11 @@ def publish_bl_state(client):
     payload = json.dumps({"state": bl_state["state"], "color_mode": "rgb",
                           "brightness": b, "rgb_color": [r, g, bl]})
     client.publish(BL_STATE_TOPIC, payload, retain=True)
-    print(f"[bridge] bl state: {payload}", flush=True)
+    print(f"[bridge] bl-state: {payload}", flush=True)
 
-# --- Debounce merge: slider bursts become ONE command ---------------------
-# (2026-08-13: without merging, 10+ MQTT messages per drag queued up -> 70s+ latency)
-DEBOUNCE = 0.8          # seconds of quiet before the accumulated command is sent
+# --- Debounce merge: slider bursts collapse into ONE command --------------------
+# (2026-08-13: without the merge, 10+ MQTT messages per drag queued up -> 70s+ latency)
+DEBOUNCE = 0.8          # seconds of quiet before the collected command is sent
 pending = {}            # merged main light commands
 bl_pending = {}         # merged backlight commands
 pending_time = 0.0
@@ -125,7 +144,7 @@ def on_message(client, userdata, msg):
         print(f"[bridge] unparseable: {msg.payload!r}", flush=True)
         return
     is_bl = msg.topic == BL_CMD_TOPIC
-    print(f"[bridge] {'bl ' if is_bl else ''}cmd: {json.dumps(cmd)}", flush=True)
+    print(f"[bridge] {'bl-' if is_bl else ''}cmd: {json.dumps(cmd)}", flush=True)
     with plock:
         if is_bl:
             for k in ("state", "brightness"):
@@ -146,21 +165,8 @@ def on_message(client, userdata, msg):
 
 def worker(client):
     global pending, bl_pending, pending_time, bl_pending_time, state, bl_state
-    last_cleanup = time.time()
     while True:
         time.sleep(0.2)
-        # Stale instance watchdog (2026-08-13: clr-adv reports "removed" but the
-        # controller keeps transmitting, an old frame floods the mesh and blocks
-        # new sends. hciconfig reset + up clears it reliably).
-        # TIME BASED instead of idle only (2026-08-13 ~16:40): the flood happened
-        # during ACTIVE use (16:05-16:08), so an idle only watchdog never fired.
-        # Now reset every 5 min regardless of traffic. The worker is single
-        # threaded (sends block), so this never interrupts an in flight send.
-        # The next command does its own prepare_radio anyway.
-        if time.time() - last_cleanup > 300:
-            last_cleanup = time.time()
-            tbc.prepare_radio()
-            print("[bridge] stale watchdog: hciconfig reset (5 min)", flush=True)
         with plock:
             take, take_bl = None, None
             if pending and time.time() - pending_time >= DEBOUNCE:
@@ -176,22 +182,16 @@ def _apply_main(client, cmd):
     global state
     try:
         changed = False
-        # BCM43455 wedge protection: freshen the radio only when the last
-        # cleanup is older than 60s. The send() cleanup (bluetooth restart)
-        # just restarted the radio, so this saves 5s of latency per command
-        # (2026-08-13 ~21:30, HA reaction ~10s -> ~4s).
-        if time.time() - tbc.LAST_CLEANUP > 60:
-            tbc.prepare_radio()
-        # ALWAYS send (fresh counter = harmless reapply, lamp dedup only blocks
-        # same counter repeats). Reason: external changes (CLI, app, power cycle)
-        # desync the internal state, so state guards would wrongly skip commands.
+        # Always send (fresh counter = harmless, the lamp applies it again). External
+        # changes (CLI, app, power cycle) desync the internal state, guards
+        # would skip commands wrongly (2026-08-13).
         if "state" in cmd:
             if cmd["state"] in ("ON", "on", "true", True):
-                send_dp("on")
+                send_dp("an")
                 state["state"] = "ON"
                 changed = True
             else:
-                send_dp("off")
+                send_dp("aus")
                 state["state"] = "OFF"
                 changed = True
         if state["state"] == "ON":
@@ -218,22 +218,18 @@ def _apply_bl(client, cmd):
     global bl_state
     try:
         changed = False
-        # BCM43455 wedge protection, only when the last cleanup is older than
-        # 60s (latency optimization, 2026-08-13 ~21:30).
-        if time.time() - tbc.LAST_CLEANUP > 60:
-            tbc.prepare_radio()
         if "state" in cmd:
             if cmd["state"] in ("ON", "on", "true", True):
-                send_dp("bl_on")
+                send_dp("bl_anders")
                 bl_state["state"] = "ON"
                 changed = True
             else:
-                send_dp("bl_off")
+                send_dp("bl_an")
                 bl_state["state"] = "OFF"
                 changed = True
-        # brightness/color without state -> switch backlight on first (app behavior)
+        # Brightness/color without state -> switch the backlight on first (app behavior)
         if ("brightness" in cmd or "rgb_color" in cmd) and bl_state["state"] != "ON" and "state" not in cmd:
-            send_dp("bl_on")
+            send_dp("bl_anders")
             bl_state["state"] = "ON"
             changed = True
         if bl_state["state"] == "ON":
@@ -252,20 +248,20 @@ def _apply_bl(client, cmd):
             publish_bl_state(client)
     except Exception:
         import traceback
-        print("[bridge] ERROR in worker (backlight):\n" + traceback.format_exc(), flush=True)
+        print("[bridge] ERROR in worker (bl):\n" + traceback.format_exc(), flush=True)
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     print(f"[bridge] MQTT connected (rc={reason_code})", flush=True)
     client.subscribe(CMD_TOPIC)
     client.subscribe(BL_CMD_TOPIC)
     disc = {
-        "name": NAME,
-        "object_id": UNIQ,
+        "name": "Deckenlampe",
+        "object_id": "deckenlampe",
         "unique_id": UNIQ,
         "schema": "json",
         "command_topic": CMD_TOPIC,
         "state_topic": STATE_TOPIC,
-        "supported_color_modes": ["color_temp"],   # color_temp implies brightness (HA validator)
+        "supported_color_modes": ["color_temp"],   # color_temp implies brightness (HA validator: brightness not combinable)
         "min_mireds": 154,
         "max_mireds": 500,
         "device": {"identifiers": [UNIQ], "name": NAME,
@@ -273,8 +269,8 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     }
     client.publish(DISC_TOPIC, json.dumps(disc), retain=True)
     bl_disc = {
-        "name": f"{NAME} Backlight",
-        "object_id": f"{UNIQ}_backlight",
+        "name": "Deckenlampe Backlight",
+        "object_id": "deckenlampe_backlight",
         "unique_id": f"{UNIQ}_backlight",
         "schema": "json",
         "command_topic": BL_CMD_TOPIC,
@@ -286,9 +282,9 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     client.publish(BL_DISC_TOPIC, json.dumps(bl_disc), retain=True)
     publish_state(client)
     publish_bl_state(client)
-    print(f"[bridge] Discovery: {DISC_TOPIC} + {BL_DISC_TOPIC}", flush=True)
+    print(f"[bridge] discovery: {DISC_TOPIC} + {BL_DISC_TOPIC}", flush=True)
 
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="tuya-lamp-bridge")
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="tuya-lampe-bridge")
 client.username_pw_set(MQTT_USER, MQTT_PASS)
 client.on_connect = on_connect
 client.on_message = on_message
@@ -301,7 +297,17 @@ def stop(sig, frm):
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 
-print(f"[bridge] Start: {MQTT_HOST}:{MQTT_PORT} cmd={CMD_TOPIC}", flush=True)
+print(f"[bridge] start: {MQTT_HOST}:{MQTT_PORT} cmd={CMD_TOPIC} serial={SERIAL_PORT}", flush=True)
+try:
+    _ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=3)
+    time.sleep(0.3)
+    _ser.reset_input_buffer()
+    _ser.write(b"status\n")
+    line = _ser.readline().decode("utf-8", errors="replace").strip()
+    print(f"[bridge] ESP32: {line or '(no reply)'}", flush=True)
+except serial.SerialException as e:
+    print(f"[bridge] warning: ESP32 not reachable ({e}) - retried on first command",
+          flush=True)
 client.connect(MQTT_HOST, MQTT_PORT, 60)
 threading.Thread(target=worker, args=(client,), daemon=True, name="worker").start()
 client.loop_forever()
