@@ -25,8 +25,8 @@ brightness, color temp, backlight, colors).
 offset  bytes  meaning
 0       3      AD: 02 01 01            (flags, Limited Discoverable)
 3       2      AD: 1b 03               (length 0x1b incl. type byte, type 0x03)
-5       6      0b 61 bc 00 07 01       (mesh header. stream 01 = main light,
-                                        stream 02 = backlight)
+5       6      0b 61 bc 00 07 02       (mesh header; 000702 = direct control
+                                        path, used by the app for ALL commands)
 11      2      counter (LE)
 13      13     kernel (encrypted DP payload, starts with 0x05)
 26      4      MIC4 (constant per command)
@@ -80,18 +80,21 @@ component is the kernel itself (see below).
 
 ## DP dictionary (captured 2026-08-13)
 
-`name: (kernel 13B, MIC4)`, `stream` = 01 (main) unless noted (backlight = 02):
+`name: (kernel 13B, MIC4)`. **All commands use header `0b61bc000702`**
+(verified against the official app 2026-08-14: main light AND backlight frames
+ride 000702; the `...01` header is the WiFi gateway path with its own counter
+space and must NOT be used for control):
 
 | command | kernel | MIC4 | stream |
 |---|---|---|---|
-| on (relay on) | `dfcf36aa6b2c34ed15db67bd3d` | `60d8d6fe` | 01 |
-| off (relay off) | `3a36cebe8edf95850ae6308b55` | `883e6ed4` | 01 |
-| bri25 (brightness 25%) | `be56d4cfffdfb0cf314e65b036` | `4ccfa9a3` | 01 |
-| bri52 (52%) | `5c41d16eaabc41c23e6cba39c6` | `ecb5ec3f` | 01 |
-| bri79 (79%) | `4c09c4f84bb8693ddfaf6ae0ec` | `44a50cc9` | 01 |
-| temp0 (color temp 0%, warm) | `109ee02e7dbad12c34f43b2a01` | `960c8317` | 01 |
-| temp42 (42%) | `8037842f227b37f792f187846a` | `83b10565` | 01 |
-| temp99 (99%, cold) | `66e175b3b76ec42eef842daf88` | `5a36660b` | 01 |
+| on (relay on) | `dfcf36aa6b2c34ed15db67bd3d` | `60d8d6fe` | 02 |
+| off (relay off) | `3a36cebe8edf95850ae6308b55` | `883e6ed4` | 02 |
+| bri25 (brightness 25%) | `be56d4cfffdfb0cf314e65b036` | `4ccfa9a3` | 02 |
+| bri52 (52%) | `5c41d16eaabc41c23e6cba39c6` | `ecb5ec3f` | 02 |
+| bri79 (79%) | `4c09c4f84bb8693ddfaf6ae0ec` | `44a50cc9` | 02 |
+| temp0 (color temp 0%, warm) | `109ee02e7dbad12c34f43b2a01` | `960c8317` | 02 |
+| temp42 (42%) | `8037842f227b37f792f187846a` | `83b10565` | 02 |
+| temp99 (99%, cold) | `66e175b3b76ec42eef842daf88` | `5a36660b` | 02 |
 | bl_on (backlight ON) | `e9447e2fc85af4287c3b9a550b` | `2ce9e348` | 02 |
 | bl_off (backlight OFF) | `0c6322e99fc4517f9a2360263d` | `8e678e23` | 02 |
 | bl5 (backlight 5%) | `55bb35e8f823f11193525d107d` | `a6fff9fb` | 02 |
@@ -126,7 +129,7 @@ beacon SDK `frame_send(..., beaconkey, ...)`). Consequences:
    Nordic extcap dir). Have someone press each action in the Tuya app 2-3×
    (~3 s apart), calling out the action name.
 3. Extract: find `0201011b03` in each logged line, take 68 hex chars, strip the
-   final 3 B CRC, so you get `...000701 <2B cnt> <26B kern+MIC4>`.
+   final 3 B CRC, so you get `...000702 <2B cnt> <26B kern+MIC4>`.
 4. Split: `kern` = bytes 0-13, `MIC4` = bytes 13-17 of that 26 B block.
    Counter = the 2 bytes before the kernel (LE).
 5. Extend the `DP` dict in `tuya_beacon_ctl.py` and the bridge's
@@ -137,13 +140,14 @@ account is needed to capture (or control) it.
 
 ## Known device quirks (this lamp generation)
 
-- **Partial freeze**: after a stale frame flood the main light (stream 01)
-  handler can stop responding to *everything*, including the official app,
-  while the backlight (stream 02) and status beacons keep working. Only a
-  ~10 s power cycle recovers it (it also clears the dedup memory). The lamp
-  boots ON, so verify recovery with an OFF command first.
-- **Backlight frames must use stream 02** (`0b61bc000702`). With stream 01 the
-  lamp silently ignores them.
+- **Partial freeze**: after a stale frame flood the main light command handler
+  can stop responding to *everything*, including the official app, while the
+  backlight and status beacons keep working. Only a ~10 s power cycle recovers
+  it (it also clears the dedup memory). The lamp boots ON, so verify recovery
+  with an OFF command first.
+- **All control frames use `0b61bc000702`** (app verified 2026-08-14). The
+  `...01` header variant belongs to the WiFi gateway path; commands sent there
+  get stale-rejected once the gateway has been active.
 - **Idle beacons**: the lamp advertises status beacons (company 0x0006, mesh
   header `01 09 20 22`) continuously even when idle. TX stays alive even when
   command processing is frozen. Don't mistake beacons for a healthy lamp.
