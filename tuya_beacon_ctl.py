@@ -2,8 +2,8 @@
 """Tuya Beacon Mesh ceiling lamp, local control from a Raspberry Pi (no app/cloud/gateway).
 
 Protocol (cracked 2026-08-13, verified against 29/29 captured frames):
-  AdvData = 020101 1b03 | 0b61bc000701 | cnt(2B LE) | kern(13B) | MIC4(4B) | t5(1B)
-  t5 = CRC8(poly=0x07, init=0, no-refin) over [0b61bc000701 | cnt | kern | MIC4] XOR 0xB5
+  AdvData = 020101 1b03 | 0b61bc000702 | cnt(2B LE) | kern(13B) | MIC4(4B) | t5(1B)
+  t5 = CRC8(poly=0x07, init=0, no-refin) over [0b61bc000702 | cnt | kern | MIC4] XOR 0xB5
   cnt must be greater than the last counter the lamp has seen (lamp side dedup).
   It is persisted in a state file next to this script (all callers share it).
 
@@ -59,8 +59,8 @@ DP = {
 }
 
 # --- Protocol ------------------------------------------------------------
-MESH = "0b61bc000701"    # Stream 01 = main light DPs (on/off/bri/temp)
-MESH_BL = "0b61bc000702" # Stream 02 = backlight DPs (bl_*/color_*)!
+MESH = "0b61bc000702"    # direct control path (like the app), for ALL DPs
+MESH_BL = "0b61bc000702" # identical, no stream split anymore
 # 2026-08-13 capture verified: the app's backlight frames use the header
 # 0b61bc000702. With the stream-01 header the lamp silently ignored them.
 
